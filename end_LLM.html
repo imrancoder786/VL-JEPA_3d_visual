@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VL-JEPA: 3Blue1Brown Style Visualizer</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Latin+Modern+Math&family=Inter:wght@400;600&display=swap');
+
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Inter', sans-serif; }
+        
+        /* 3B1B Style UI */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;
+            display: flex; flex-direction: column; justify-content: space-between;
+        }
+
+        header {
+            padding: 30px; 
+            background: linear-gradient(to bottom, rgba(0,0,0,0.9), transparent);
+            pointer-events: auto;
+        }
+        h1 { margin: 0; color: #fff; font-family: 'Latin Modern Math', serif; font-size: 32px; font-weight: normal; }
+        p { color: #aaa; margin-top: 5px; font-size: 14px; max-width: 600px; line-height: 1.5; }
+
+        /* The Explanation Box */
+        #narration-box {
+            position: absolute; top: 100px; right: 40px; width: 320px;
+            background: rgba(20, 20, 20, 0.9); border-left: 4px solid #3b82f6;
+            padding: 20px; border-radius: 0 8px 8px 0;
+            color: #eee; font-size: 15px; line-height: 1.6;
+            transform: translateX(20px); opacity: 0; transition: all 0.5s ease;
+        }
+        #narration-box.visible { transform: translateX(0); opacity: 1; }
+        
+        /* Math formulas */
+        .math { font-family: 'Latin Modern Math', serif; font-style: italic; color: #7dd3fc; }
+
+        /* Controls */
+        #controls {
+            padding: 40px; text-align: center; pointer-events: auto;
+            background: linear-gradient(to top, rgba(0,0,0,0.9), transparent);
+        }
+        
+        button {
+            background: #eee; color: #111; border: none;
+            padding: 14px 32px; font-size: 16px; font-weight: 600;
+            border-radius: 8px; cursor: pointer; transition: transform 0.1s;
+            box-shadow: 0 4px 15px rgba(255,255,255,0.1);
+        }
+        button:hover { transform: scale(1.05); background: #fff; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .progress-bar {
+            position: absolute; bottom: 0; left: 0; height: 4px; background: #3b82f6; transition: width 0.5s;
+        }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@tweenjs/tween.js": "https://unpkg.com/@tweenjs/tween.js@23.1.1/dist/tween.esm.js"
+        }
+    }
+    </script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <header>
+            <h1>VL-JEPA Architecture</h1>
+            [cite_start]<p>A strictly controlled visualization of how the Joint Embedding Predictive Architecture processes video and text without pixel-level reconstruction[cite: 9, 48].</p>
+        </header>
+
+        <div id="narration-box" class="visible">
+            <strong>Introduction</strong><br><br>
+            Welcome. This model explains how VL-JEPA solves tasks by predicting abstract embeddings instead of generating tokens.<br><br>
+            Click <strong>Start</strong> to begin the data flow.
+        </div>
+
+        <div id="controls">
+            <button id="btn-next">▶ Step 1: Encode Vision</button>
+        </div>
+        <div id="progress" class="progress-bar" style="width: 0%"></div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import TWEEN from '@tweenjs/tween.js';
+
+        // --- Configuration ---
+        const CONFIG = {
+            colors: {
+                vision: 0x60A5FA,    // Light Blue
+                text: 0xFBBF24,      // Amber
+                embedding: 0x34D399, // Emerald Green
+                predictor: 0xA78BFA, // Soft Purple
+                bg: 0x111111,
+                wire: 0x333333
+            },
+            animSpeed: 1.0
+        };
+
+        // --- Scene Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(CONFIG.colors.bg);
+        // Soft fog for depth
+        scene.fog = new THREE.Fog(CONFIG.colors.bg, 20, 50);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 5, 18);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+
+        const spotLight = new THREE.SpotLight(0xffffff, 100);
+        spotLight.position.set(5, 15, 5);
+        spotLight.angle = Math.PI / 4;
+        spotLight.penumbra = 0.5;
+        spotLight.castShadow = true;
+        scene.add(spotLight);
+
+        // --- Helper: Text Texture Generator ---
+        // Creates sharp text labels on planes without external font files
+        function createTextTexture(text, colorStr = "white", bgColor = null) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 128;
+            const ctx = canvas.getContext('2d');
+            
+            if (bgColor) {
+                ctx.fillStyle = bgColor;
+                ctx.fillRect(0,0,512,128);
+            }
+            
+            ctx.font = "bold 48px 'Inter', sans-serif";
+            ctx.fillStyle = colorStr;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(text, 256, 64);
+            
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.minFilter = THREE.LinearFilter;
+            return tex;
+        }
+
+        // --- Objects Construction ---
+        
+        // 1. Video Input Block
+        function createVideoStack() {
+            const group = new THREE.Group();
+            group.position.set(-6, 0, 0);
+            
+            const geo = new THREE.PlaneGeometry(1.6, 0.9);
+            for(let i=0; i<3; i++) {
+                // Simulate "Video Frames"
+                const canvas = document.createElement('canvas');
+                canvas.width = 128; canvas.height = 128;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#222'; ctx.fillRect(0,0,128,128);
+                ctx.fillStyle = '#60A5FA'; 
+                // Draw a simple "dog" shape (blob) that moves per frame
+                ctx.beginPath(); 
+                ctx.arc(64 + (i*10), 64, 20, 0, Math.PI*2); 
+                ctx.fill();
+                
+                const tex = new THREE.CanvasTexture(canvas);
+                const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.z = i * 0.5;
+                group.add(mesh);
+            }
+            
+            // Label
+            const label = new THREE.Mesh(new THREE.PlaneGeometry(2, 0.5), new THREE.MeshBasicMaterial({ map: createTextTexture("Video Input (Xv)", "#60A5FA"), transparent: true }));
+            label.position.set(0, 1.2, 0);
+            group.add(label);
+            
+            scene.add(group);
+            return group;
+        }
+
+        // 2. Text Query Block
+        function createQueryBlock() {
+            const group = new THREE.Group();
+            group.position.set(0, -2, 4); // Closer to camera
+            
+            const geo = new THREE.BoxGeometry(3, 0.5, 0.1);
+            const mat = new THREE.MeshBasicMaterial({ color: CONFIG.colors.text });
+            const mesh = new THREE.Mesh(geo, mat);
+            group.add(mesh);
+            
+            const textMat = new THREE.MeshBasicMaterial({ map: createTextTexture('"What is the dog doing?"', "black", "#FBBF24") });
+            const textMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, 0.75), textMat);
+            textMesh.position.z = 0.06;
+            group.add(textMesh);
+            
+            scene.add(group);
+            return group;
+        }
+
+        // 3. Neural Network Stacks (Generic)
+        function createNeuralBlock(color, label, x, z, scaleY=1) {
+            const group = new THREE.Group();
+            group.position.set(x, 0, z);
+            
+            // Layers
+            const boxGeo = new THREE.BoxGeometry(1.5, 0.2, 1.5);
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: color, transparent: true, opacity: 0.9, 
+                emissive: color, emissiveIntensity: 0.2 
+            });
+            
+            for(let i=0; i<5; i++) {
+                const layer = new THREE.Mesh(boxGeo, mat);
+                layer.position.y = (i * 0.3) - 0.5;
+                layer.scale.set(1 - i*0.1, 1, 1 - i*0.1);
+                group.add(layer);
+            }
+            
+            // Wireframe Cage
+            const cageGeo = new THREE.BoxGeometry(1.6, 1.6 * scaleY, 1.6);
+            const cageMat = new THREE.MeshBasicMaterial({ color: color, wireframe: true, opacity: 0.2, transparent: true });
+            const cage = new THREE.Mesh(cageGeo, cageMat);
+            cage.position.y = 0.2;
+            group.add(cage);
+
+            // Label
+            const labelTex = createTextTexture(label, "#ffffff");
+            const labelMesh = new THREE.Mesh(new THREE.PlaneGeometry(3, 0.75), new THREE.MeshBasicMaterial({ map: labelTex, transparent: true }));
+            labelMesh.position.set(0, 1.5 * scaleY, 0);
+            group.add(labelMesh);
+
+            scene.add(group);
+            return group;
+        }
+
+        // Initialize Objects
+        const videoInput = createVideoStack();
+        const textQuery = createQueryBlock();
+        
+        const xEncoder = createNeuralBlock(CONFIG.colors.vision, "X-Encoder (Frozen)", -3, 0);
+        const predictor = createNeuralBlock(CONFIG.colors.predictor, "Predictor (Llama 3)", 0, 0, 1.2);
+        const decoder = createNeuralBlock(0x888888, "Y-Decoder (Optional)", 3.5, 0);
+
+        // Connection Wires (Visual Lines)
+        function createConnection(p1, p2, color) {
+            const points = [p1, new THREE.Vector3((p1.x+p2.x)/2, p1.y+1, (p1.z+p2.z)/2), p2];
+            const curve = new THREE.QuadraticBezierCurve3(p1, points[1], p2);
+            const tube = new THREE.TubeGeometry(curve, 20, 0.03, 8, false);
+            const mesh = new THREE.Mesh(tube, new THREE.MeshBasicMaterial({ color: color, opacity: 0.3, transparent: true }));
+            scene.add(mesh);
+            return curve;
+        }
+
+        // Store paths for animation
+        const paths = {
+            visionToEnc: createConnection(new THREE.Vector3(-6,0,0), new THREE.Vector3(-3,0,0), CONFIG.colors.vision),
+            encToPred: createConnection(new THREE.Vector3(-3,0.5,0), new THREE.Vector3(0,0.5,0), CONFIG.colors.vision),
+            textToPred: createConnection(new THREE.Vector3(0,-2,4), new THREE.Vector3(0,0,0.8), CONFIG.colors.text),
+            predToDec: createConnection(new THREE.Vector3(0,0.5,0), new THREE.Vector3(3.5,0.5,0), CONFIG.colors.embedding)
+        };
+
+
+        // --- Animation Logic ---
+
+        let currentStep = 0;
+        const narration = document.getElementById('narration-box');
+        const btn = document.getElementById('btn-next');
+        const progressBar = document.getElementById('progress');
+
+        // Function to animate a particle along a path
+        function sendDataPacket(curve, color, duration, onComplete) {
+            const geometry = new THREE.SphereGeometry(0.15, 16, 16);
+            const material = new THREE.MeshBasicMaterial({ color: color });
+            const sphere = new THREE.Mesh(geometry, material);
+            scene.add(sphere);
+
+            const progress = { t: 0 };
+            new TWEEN.Tween(progress)
+                .to({ t: 1 }, duration)
+                .easing(TWEEN.Easing.Quadratic.InOut)
+                .onUpdate(() => {
+                    const point = curve.getPoint(progress.t);
+                    sphere.position.copy(point);
+                })
+                .onComplete(() => {
+                    scene.remove(sphere);
+                    // Flash effect at destination
+                    const flash = new THREE.PointLight(color, 2, 4);
+                    flash.position.copy(curve.getPoint(1));
+                    scene.add(flash);
+                    setTimeout(() => scene.remove(flash), 200);
+                    
+                    if (onComplete) onComplete();
+                })
+                .start();
+        }
+
+        // Step definitions
+        const steps = [
+            {
+                name: "Step 1: Visual Encoding",
+                action: () => {
+                    narration.innerHTML = `
+                        <strong>1. Visual Encoding</strong><br><br>
+                        The raw video frames <span class="math">X<sub>v</sub></span> are processed by the <strong>X-Encoder</strong> (V-JEPA).<br><br>
+                        [cite_start]This converts pixels into abstract <em>Visual Tokens</em> <span class="math">S<sub>v</sub></span>[cite: 118].
+                    `;
+                    // Animate Vision Data
+                    sendDataPacket(paths.visionToEnc, CONFIG.colors.vision, 1500, () => {
+                         // Flash Encoder
+                         new TWEEN.Tween(xEncoder.scale).to({x:1.2, y:1.2, z:1.2}, 200).yoyo(true).repeat(1).start();
+                    });
+                    progressBar.style.width = "33%";
+                }
+            },
+            {
+                name: "Step 2: Prediction",
+                action: () => {
+                    narration.innerHTML = `
+                        <strong>2. Latent Prediction</strong><br><br>
+                        The <strong>Predictor</strong> receives the Visual Tokens <span class="math">S<sub>v</sub></span> AND the Text Query <span class="math">X<sub>q</sub></span>.<br><br>
+                        [cite_start]It predicts a single <em>Target Embedding</em> <span class="math">S<sub>y</sub></span> that represents the answer[cite: 119].
+                    `;
+                    // Animate Vision Token moving to Predictor
+                    sendDataPacket(paths.encToPred, CONFIG.colors.vision, 1000);
+                    // Animate Text Query moving to Predictor
+                    sendDataPacket(paths.textToPred, CONFIG.colors.text, 1000, () => {
+                        // Flash Predictor
+                        new TWEEN.Tween(predictor.rotation).to({y: Math.PI}, 500).yoyo(true).repeat(1).start();
+                    });
+                    progressBar.style.width = "66%";
+                }
+            },
+            {
+                name: "Step 3: Decoding",
+                action: () => {
+                    narration.innerHTML = `
+                        <strong>3. Selective Decoding</strong><br><br>
+                        The predicted embedding <span class="math">S<sub>y</sub></span> is sent to the lightweight <strong>Y-Decoder</strong>.<br><br>
+                        [cite_start]This translates the abstract math back into text: <em>"Running"</em>[cite: 124].
+                    `;
+                    sendDataPacket(paths.predToDec, CONFIG.colors.embedding, 1500, () => {
+                        // Show result text
+                        const resultTex = createTextTexture("Output: Running", "#34D399");
+                        const resultMesh = new THREE.Mesh(new THREE.PlaneGeometry(4, 1), new THREE.MeshBasicMaterial({ map: resultTex, transparent: true }));
+                        resultMesh.position.set(3.5, 2.5, 0);
+                        scene.add(resultMesh);
+                        
+                        // Float up animation
+                        new TWEEN.Tween(resultMesh.position).to({ y: 3.5 }, 2000).start();
+                        new TWEEN.Tween(resultMesh.material).to({ opacity: 0 }, 3000).onComplete(()=>scene.remove(resultMesh)).start();
+                    });
+                    progressBar.style.width = "100%";
+                }
+            }
+        ];
+
+        // Button Handler
+        btn.onclick = () => {
+            if (currentStep < steps.length) {
+                steps[currentStep].action();
+                currentStep++;
+                
+                if (currentStep < steps.length) {
+                    btn.innerText = "▶ " + steps[currentStep].name;
+                } else {
+                    btn.innerText = "↺ Reset Simulation";
+                }
+            } else {
+                // Reset
+                currentStep = 0;
+                progressBar.style.width = "0%";
+                btn.innerText = "▶ " + steps[0].name;
+                narration.innerHTML = "Click Start to begin again.";
+                // Reset camera gently
+                new TWEEN.Tween(camera.position).to({x:0, y:5, z:18}, 1000).start();
+            }
+        };
+
+
+        // --- Main Loop ---
+        function animate(time) {
+            requestAnimationFrame(animate);
+            TWEEN.update(time);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
